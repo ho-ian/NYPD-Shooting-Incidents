@@ -1,0 +1,1049 @@
+---
+title: "**NYPD Shooting Incidents**"
+author: "**Ian Ho - Harvard Data Science Professional Certificate Program**"
+date: "4/2/2021 - Vancouver, Canada"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    highlight: pygments
+    number_sections: true
+    df_print: kable
+urlcolor: blue
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(error = TRUE, echo = TRUE, fig.align = 'center', cache = FALSE, cache.lazy = FALSE, message = FALSE, warning = FALSE, fig.pos = "h", error = FALSE, comment = NA)
+```
+
+```{r echo = FALSE}
+if(!require(tidyverse)) install.packages("tidyverse")
+if(!require(stringr)) install.packages("stringr")
+if(!require(scales)) install.packages("scales")
+if(!require(caret)) install.packages("caret")
+if(!require(rpart)) install.packages("rpart")
+if(!require(randomForest)) install.packages("randomForest")
+if(!require(dplyr)) install.packages("dplyr")
+if(!require(ggridges)) install.packages("ggridges")
+if(!require(lubridate)) install.packages("lubridate")
+if(!require(leaflet)) install.packages("leaflet")
+if(!require(mapview)) install.packages("mapview"); webshot::install_phantomjs()
+if(!require(kableExtra)) install.packages("kableExtra")
+```
+
+```{r echo = FALSE}
+options(digits = 5)
+```
+
+```{r echo = FALSE, results = 'hide'}
+dl <- tempfile()
+download.file("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD", dl)
+dat <- read_csv(dl)
+file.remove(dl)
+rm(dl)
+
+## DATA CLEANING SECTION ##
+
+# seeing and counting which columns have NA's
+sum(is.na(dat$BORO))
+sum(is.na(dat$PRECINCT))
+sum(is.na(dat$JURISDICTION_CODE))
+sum(is.na(dat$LOCATION_DESC))
+sum(is.na(dat$STATISTICAL_MURDER_FLAG))
+sum(is.na(dat$PERP_AGE_GROUP))
+sum(is.na(dat$PERP_SEX))
+sum(is.na(dat$PERP_RACE))
+sum(is.na(dat$VIC_AGE_GROUP))
+sum(is.na(dat$VIC_SEX))
+sum(is.na(dat$VIC_RACE))
+
+# proportion of na's to the number of rows in the data set
+sum(is.na(dat$JURISDICTION_CODE))/nrow(dat)
+sum(is.na(dat$LOCATION_DESC))/nrow(dat)
+sum(is.na(dat$PERP_AGE_GROUP))/nrow(dat)
+sum(is.na(dat$PERP_SEX))/nrow(dat)
+sum(is.na(dat$PERP_RACE))/nrow(dat)
+
+# we can remove the rows in jurisdiction code with na because it has a small enough
+# proportion to the data set, however, the columns location_desc, perp_age_group,
+# perp_sex and perp_race have too high of a proportion to the dataset. I think
+# it is most advisable to NOT INCLUDE them in the machine learning portion because
+# they would not be reliable predictors.
+
+# removing na rows in jurisdiction code
+dat <- dat[!is.na(dat$JURISDICTION_CODE),]
+
+# make date into correct type
+dat$OCCUR_DATE <- date(mdy(dat$OCCUR_DATE))
+
+# remove a unnecessary columns
+dat <- dat %>% select(-INCIDENT_KEY,
+                      -Lon_Lat,
+                      -X_COORD_CD,
+                      -Y_COORD_CD,
+                      -LOCATION_DESC,
+                      -PERP_AGE_GROUP,
+                      -PERP_SEX,
+                      -PERP_RACE)
+
+# make vic_race factor
+dat$VIC_RACE <- factor(dat$VIC_RACE)
+
+
+## CREATING WORKING AND VALIDATION SETS ##
+
+y <- dat$VIC_RACE
+set.seed(212, sample.kind = "Rounding")
+validation_index <- createDataPartition(y, times = 1, p = 0.15, list = FALSE)
+validation <- dat %>% slice(validation_index)
+dat <- dat %>% slice(-validation_index)
+```
+
+\newpage
+# Executive Summary
+In this Capstone Project, we explore a data set named [NYPD Shooting Incident Data](https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic). I am particularly interested in this data set because of the amount of news headlines in 2020 & 2021 surrounding racial profiling, shooting incidents, and police brutality around the world. My motivating question in this project was: **Can we predict victim's race using date time, location, and victim related data?** I believe there is value in applying machine learning techniques to predicting a victim's race because it can give a better sense of whether or not a demographic, location, and/or datetime has an effect on a particular race is involved in a shooting incident. It is possible that shooting incidents are racially influenced or there may be influence from unknown confounding variables, our goal is to get a better understanding of it through the lens of data science. 
+
+To overview the process of this data science project. I initially explored the data and found a number of missing values in namely 4 columns: Location Description, Perpetrator Age Group, Perpetrator Sex, and Perpetrator Race. Because of their high proportion to the overall data set, I did not feel comfortable replacing the missing the values with the mean/mode nor was I comfortable with removing the entire row. I therefore made the judgment to remove these columns from the data set as I believe the large number of missing values would negatively influence the machine learning algorithms. After cleaning the data, I explored the data by looking at counts, proportions, and proportion of deaths in shooting incidents via various lenses in the data set. I then visualized these insights in the following section before diving further into distributions and probabilities of the data set with a focus on the victim's race to gain a better understanding of how a particular predictor may have had an effect on the victim's race. Finally, I applied machine learning algorithms to try and predict the victim races. After observing their accuracies, I decide to cross validate their tuning parameters to obtain potentially higher accuracies while avoiding overfitting. The final model is trained with the entire data set and then tested against the validation set created at the beginning of the script.
+
+Overall classification accuracy is the most important metric in our models because it is equally important for all races to be correctly identified. While sensitivity and specificity are important qualities to have in various classification problems, our goal is to have a balanced accuracy cross all races as they are all equally important to accurately predict. A baseline goal is to have a better prediction than the naive solution, guessing all victim races to be the mode, Black. In our case, that would mean a better accuracy than **0.71487**. Testing multiple models, and lots of trial and error to fine tune each model, I came up with an accuracy of **0.76515** in training. The final model tested against the validation set came up with an accuracy of **0.77819**. 
+
+
+\newpage
+# Exploratory Data Analysis
+
+## Preliminary Data Exploration
+The overall NYPD Shooting Incident Data set has `r nrow(dat) + nrow(validation)` rows. For the purposes of mimicking an unknown data set, we split the data into `r nrow(dat)` rows (```dat```) for data exploration, analysis, and machine learning training and testing and `r nrow(validation)` rows (```validation```) for testing our final model. 
+
+There are `r ncol(dat)` columns in the data:
+
+- OCCUR_DATE ```<date>``` contains the date of the shooting incident.
+- OCCUR_TIME ```<time>``` contains the time of the shooting incident.
+- BOROUGH ```<character>``` contains the borough for where the shooting incident took place in New York City.
+- PRECINCT ```<numeric>``` contains the NYPD precinct that responded to the shooting incident.
+- JURISDICTION_CODE ```<numeric>``` contains the jurisdiction code with respect to the shooting incident.
+- STATISTICAL_MURDER_FLAG ```<logical>``` contains TRUE for a shooting incident causing death and FALSE fora nonfatal shooting incident.
+- VIC_AGE_GROUP ```<character>``` contains age ranges for which the victim of the shooting incident belongs to.
+- VIC_SEX ```<character>``` contains genders for which the victim of the shooting incident belongs to.
+- VIC_RACE ```<factor>``` contains races for which the victim of the shooting incident belongs to. This is the variable we are interested in predicting.
+- Longitude ```<numeric>``` contains the longitudinal geographic coordinate for the shooting incident.
+- Latitude ```<numeric>``` contains the latitudinal geographic coordinate for the shooting incident.
+
+Inspecting the first 10 rows of the data frame:
+```{r echo = FALSE}
+dat %>%
+  select(OCCUR_DATE,
+         OCCUR_TIME,
+         BORO,
+         PRECINCT,
+         JURISDICTION_CODE) %>%
+  head(10) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "scale_down", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+```{r echo = FALSE}
+dat %>%
+  select(STATISTICAL_MURDER_FLAG,
+         VIC_AGE_GROUP,
+         VIC_SEX,
+         VIC_RACE,
+         Longitude,
+         Latitude) %>%
+  head(10) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "scale_down", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+\newpage
+Below we explore some of the values we see in some columns:
+
+- `r min(dat$OCCUR_DATE)` is the earliest shooting incident date as found in OCCUR_DATE.
+- `r max(dat$OCCUR_DATE)` is the latest shooting incident date as found in OCCUR_DATE. 
+- `r unique(dat$BORO)` are all the different boroughs in New York City under the BORO column.
+- `r unique(dat$PRECINCT)` are all the different precincts in New York City under the PRECINCT column.
+- `r unique(dat$JURISDICTION_CODE)` are the jurisdiction codes in New York City under JURISDICTION_CODE.
+- `r unique(dat$VIC_AGE_GROUP)` are the different age groups related to victims of shooting incidents in VIC_AGE_GROUP.
+- `r unique(dat$VIC_SEX)` are the different genders related to victims of shooting incidents in VIC_SEX.
+- `r unique(dat$VIC_RACE)` are the different races related to victims of shooting incidents in VIC_RACE.
+- `r mean(dat$STATISTICAL_MURDER_FLAG)` is the proportion of deaths caused by shooting incidents in STATISTICAL_MURDER_FLAG.
+
+\newpage
+## Advanced Data Exploration
+
+### Shooting Incidents grouped by Borough
+
+We are interested to see if there is a more likely borough to have shooting incidents and whether or not those shooting incidents are more likely to result in death. 
+```{r echo = FALSE}
+boro_incidents <- dat %>%
+  group_by(BORO) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+boro_incidents %>%
+  arrange(desc(count)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+### Top 10 Shooting Incidents grouped by Precinct
+
+Which precincts have the most shooting incidents in New York City? Are some precinct shooting incidents more likely to result in death than others? Below we observe the top 10 precincts invovled in shooting incidents.
+```{r echo = FALSE}
+precinct_incidents <- dat %>%
+  group_by(PRECINCT) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+precinct_incidents %>%
+  arrange(desc(count)) %>%
+  top_n(10) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+### Shooting Incidents grouped by Jurisdiction Code
+
+How are shooting incidents related to jurisdiction codes? Are they evenly distributed across codes or is are certain jurisdiction codes more involved in shooting incidents?
+```{r echo = FALSE}
+jurisdiction_incidents <- dat %>%
+  group_by(JURISDICTION_CODE) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+jurisdiction_incidents %>%
+  arrange(desc(count)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+### Shooting Incidents grouped by Victim Age Group
+
+What age groups are more likely to be involved in shooting incidents? Below we look at the age groups and the number of shooting incidents, proportion to total shooting incidents, and proportion to death.
+```{r echo = FALSE}
+victim_age_incidents <- dat %>%
+  group_by(VIC_AGE_GROUP) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+victim_age_incidents %>%
+  arrange(desc(count)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+### Shooting Incidents grouped by Victim Sex
+
+Is one gender more likely to be involved in shooting incidents? Below we look at all genders and their involvement in shooting incidents.
+```{r echo = FALSE}
+victim_sex_incidents <- dat %>%
+  group_by(VIC_SEX) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+victim_sex_incidents %>%
+  arrange(desc(count)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+### Shooting Incidents grouped by Victim Race
+
+What is the relationship between victim race and shooting incidents? Are some races more likely to be involved in shooting incidents compared to others? Are some races more likely to die?
+```{r echo = FALSE}
+victim_race_incidents <- dat %>%
+  group_by(VIC_RACE) %>%
+  summarize(count = n(), 
+            prop = count/nrow(dat),
+            prop_death = mean(STATISTICAL_MURDER_FLAG))
+
+victim_race_incidents %>%
+  arrange(desc(count)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+\newpage
+# Data Visualization
+
+## Distribution Plots
+
+Here we look at the distribution of shooting incidents by occurrence date. This gives us a better idea of when shooting incidents were more likely to occur historically.
+```{r echo = FALSE}
+dat %>%
+  ggplot(aes(x = OCCUR_DATE)) + 
+  geom_histogram(bins = 48) +
+  xlab("Occur Date") +
+  ylab("Count of Shooting Incidents") +
+  ggtitle("Distribution of Shooting Incidents by Date of Occurence")
+```
+
+Now we take a look at the distribution of shooting incidents grouped by occurrence time. We originally inspected the data and found that most values tended to center around midnight, below is a modified version of the data to better visualize this finding.
+```{r echo = FALSE}
+justtime <- function(x, split=12) {
+  h <- as.numeric(strftime(x, "%H"))
+  y <- as.POSIXct(paste(ifelse(h<split, "2015-01-02","2015-01-01"),strftime(x, "%H:%M:%S")))
+}
+
+dat %>% 
+  mutate(time = justtime(OCCUR_TIME)) %>%
+  ggplot(aes(time)) + 
+  geom_histogram(bins = 48) + 
+  scale_x_datetime(labels = function(x) format(x, format = "%H:%M")) + 
+  xlab("Occur Time") +
+  ylab("Count of Shooting Incidents") +
+  ggtitle("Distribution of Shooting Incidents by Time of Occurrence")
+```
+
+\newpage
+## Barplots
+
+The following barplots illustrate the insights gained in the Advanced Data Exploration section prior. These succinctly show which values in each column are related to the most shooting incidents.
+
+```{r echo = FALSE}
+boro_incidents %>%
+  ggplot(aes(count, y = reorder(BORO, -count), fill = BORO)) + 
+  geom_bar(stat = "identity") +
+  ylab("Borough") +
+  xlab("Number of Shooting Incidents") +
+  ggtitle("Number of Shooting Incidents Grouped By Borough") +
+  theme(legend.position = "none")
+```
+
+```{r echo = FALSE}
+precinct_incidents %>%
+  ggplot(aes(PRECINCT, count, fill = PRECINCT)) +
+  geom_bar(stat = "identity") +
+  ylab("Number of Shooting Incidents") +
+  xlab("Precinct") +
+  ggtitle("Number of Shooting Incidents Grouped By Precinct") +
+  theme(axis.text.x = element_blank()) +
+  guides(fill = guide_legend(title = "Precinct"))
+```
+
+```{r echo = FALSE}
+jurisdiction_incidents %>%
+  ggplot(aes(count, y = reorder(JURISDICTION_CODE, -count), fill = JURISDICTION_CODE)) +
+  geom_bar(stat = "identity") +
+  ylab("Jurisdiction Code") +
+  xlab("Number of Shooting Incidents") +
+  ggtitle("Number of Shooting Incidents Grouped By Jurisdiction Code") +
+  theme(legend.position = "none")
+```
+
+```{r echo = FALSE}
+victim_age_incidents %>%
+  ggplot(aes(VIC_AGE_GROUP, y = count, fill = VIC_AGE_GROUP)) +
+  geom_bar(stat = "identity") +
+  ylab("Number of Shooting Incidents") +
+  xlab("Victim Age Group") +
+  ggtitle("Number of Shooting Incidents Grouped By Victim Age Group") +
+  theme(legend.position = "none")
+```
+
+```{r echo = FALSE}
+victim_sex_incidents %>%
+  ggplot(aes(reorder(VIC_SEX, -count), y = count, fill = VIC_SEX)) +
+  geom_bar(stat = "identity") +
+  ylab("Number of Shooting Incidents") +
+  xlab("Victim Sex") +
+  ggtitle("Number of Shooting Incidents Grouped By Victim Sex") +
+  theme(legend.position = "none")
+```
+
+```{r echo = FALSE}
+victim_race_incidents %>% 
+  ggplot(aes(count, y = reorder(VIC_RACE, - count), fill = VIC_RACE)) +
+  geom_bar(stat = "identity") +
+  ylab("Victim Race") +
+  xlab("Number of Shooting Incidents") +
+  ggtitle("Number of Shooting Incidents Grouped By Victim Race") +
+  theme(legend.position = "none")
+```
+
+\newpage
+## Geographic Plots
+
+In this cluster plot, we can see that there are longitudinal and latitudinal clusters where more shooting incidents take place. This tells us that the information from ```Longitude``` and ```Latitude``` are more specific and useful compared to just using borough information.
+```{r echo = FALSE}
+cluster <- leaflet(dat) %>%
+  addTiles() %>%
+  addMarkers(clusterOptions = markerClusterOptions()) %>%
+  setView(-74.00, 40.71, zoom = 10) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder")
+mapshot(cluster, file = paste0(getwd(), "/cluster.png"))
+```
+![Shooting Incident Clusters in New York City](cluster.png)
+
+\newpage
+We can compare cluster plot with the borough plot below. As we can see, shooting incidents in ```Queens``` is split into multiple clusters due to a higher variability in locations of incidents. 
+```{r echo = FALSE}
+borocol <- colorFactor(palette = "Set1", dat$BORO)
+
+borough <- leaflet(dat) %>%
+  addTiles() %>%
+  addCircleMarkers(lng = ~Longitude, lat = ~Latitude,
+                   color = ~borocol(dat$BORO), weight = 1,
+                   opacity = 1, radius = 0.1) %>%
+  setView(-74.00, 40.71, zoom = 10) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder") %>%
+  addLegend(pal = borocol, values = dat$BORO, position = "topleft")
+
+mapshot(borough, file = paste0(getwd(), "/borough.png"))
+```
+![Shooting Incident Coloured by Borough in New York City](borough.png)
+
+\newpage
+By colouring shooting incidents by precinct, we gain a better understanding of the relationship between borough, precinct, and total shooting incidents in New York City.
+```{r echo = FALSE}
+preccol <- colorFactor(palette = hue_pal()(length(unique(dat$PRECINCT))), dat$PRECINCT)
+
+precinct <- leaflet(dat) %>%
+  addTiles() %>%
+  addCircleMarkers(lng = ~Longitude, lat = ~Latitude,
+                   color = ~preccol(dat$PRECINCT), weight = 1,
+                   opacity = 1, radius = 0.1) %>%
+  setView(-74.00, 40.71, zoom = 10) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder")
+
+mapshot(precinct, file = paste0(getwd(), "/precinct.png"))
+```
+![Shooting Incidents Coloured by Precinct in New York City](precinct.png)
+
+\newpage
+Are certain age groups more likely to be shot in certain areas? We visually inspect this idea by taking a closer look at a specific borough, Staten Island. Here we can see that there are multiple clusters of shooting incidents and we can note that ```<18``` tends to be more sparse compared to ```18-24``` and ```25-44``` age groups.
+```{r echo = FALSE}
+# plot of shooting incidents in staten island by age
+agecol <- colorFactor(palette = "Set1", dat$VIC_AGE_GROUP)
+age <- leaflet(dat[dat$BORO == "STATEN ISLAND",]) %>%
+  addTiles() %>%
+  addCircles(lng = ~Longitude, lat = ~Latitude,
+                   radius = 5, opacity = 1,
+                   color = ~agecol(dat$VIC_AGE_GROUP)) %>%
+  setView(-74.15, 40.58, zoom = 12) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder") %>%
+  addLegend(pal = agecol, values = dat$VIC_AGE_GROUP, position = "topleft")
+
+mapshot(age, file = paste0(getwd(), "/age.png"))
+```
+![Shooting Incidents in Staten Island grouped by Victim Age](age.png)
+
+\newpage
+We do the same inspection for victim sex and we find that all shooting incidents are largely involving ```males``` Shooting incidents involving ```females``` and ```unknown``` don't seem to have distinct locations in Staten Island.
+```{r echo = FALSE}
+sexcol <- colorFactor(palette = "Set1", dat$VIC_SEX)
+sex <- leaflet(dat[dat$BORO == "STATEN ISLAND",]) %>%
+  addTiles() %>%
+  addCircles(lng = ~Longitude, lat = ~Latitude,
+             radius = 5, opacity = 1,
+             color = ~sexcol(dat$VIC_SEX)) %>%
+  setView(-74.15, 40.58, zoom = 12) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder") %>%
+  addLegend(pal = sexcol, values = dat$VIC_SEX, position = "topleft")
+
+mapshot(sex, file = paste0(getwd(), "/sex.png"))
+```
+![Shooting Incidents in Staten Island grouped by Victim Sex](sex.png)
+
+\newpage
+Lastly we take a look at victim race within Staten Island. We see that most shooting incidents involve a ```Black``` victim and that clusters tend to include ```Black``` and ```White Hispanic``` victims.
+```{r echo = FALSE}
+racecol <- colorFactor(palette = "Set1", dat$VIC_RACE)
+race <- leaflet(dat[dat$BORO == "STATEN ISLAND",]) %>%
+  addTiles() %>%
+  addCircles(lng = ~Longitude, lat = ~Latitude,
+             radius = 5, opacity = 1,
+             color = ~racecol(dat$VIC_RACE)) %>%
+  setView(-74.15, 40.58, zoom = 12) %>%
+  addProviderTiles("CartoDB.VoyagerLabelsUnder") %>%
+  addLegend(pal = racecol, values = dat$VIC_RACE, position = "topleft")
+
+mapshot(race, file = paste0(getwd(), "/race.png"))
+```
+![Shooting Incidents in Staten Island grouped by Victim Race](race.png)
+
+
+\newpage
+# Distribution & Probability Analysis
+
+## Density Distributions
+
+### Shooting Incidents over Occurrence Hour
+
+To further visualize the effect of occurrence time, we stratify the occurrence time into occurrence hour centered around midnight and then we plot a density plot to see what times shooting incidents most likely happen. We see that most shootings happen at or before midnight and shootings rarely occur past 5 am.
+```{r echo = FALSE}
+dat %>%
+  mutate(hour = ifelse(hour(OCCUR_TIME) > 12, hour(OCCUR_TIME) - 24, hour(OCCUR_TIME))) %>%
+  group_by(hour) %>%
+  ggplot(aes(x = hour)) + 
+  geom_density() +
+  xlab("Hour") +
+  ylab("Probability") +
+  ggtitle("Density Plot of Shooting Incidents over Occurrence Hour")
+```
+
+\newpage
+### Shooting Incidents over Occurence Hour split by Victim Race
+
+Here is the same idea from above but split between victim races to see if any one race tends to have a more distinct time for when a shooting incident is to occur. As we can see visually, there tends to be no difference between races, however, we can note that ```AMERICAN INDIAN/ALASKAN NATIVE``` has a lower likelihood at around evening time.
+```{r echo = FALSE}
+dat %>%
+  mutate(hour = ifelse(hour(OCCUR_TIME) > 12, hour(OCCUR_TIME) - 24, hour(OCCUR_TIME))) %>%
+  group_by(hour, VIC_RACE) %>%
+  ggplot(aes(x = hour, y = VIC_RACE)) +
+  geom_density_ridges(aes(fill = VIC_RACE), alpha = 0.55) +
+  xlab("Hour") +
+  ylab("Probability") +
+  ggtitle("Density Plot of Shooting Incidents by Victim Race over Occurence Hour") +
+  theme(legend.position = "none")
+```
+\newpage
+## Probability Distributions
+
+### Victim Age Group and Victim Race 
+
+Here we take a look at the probabilities of victim races with respect to victim age groups. Given that the victim is of a particular age group, what is the likelihood that they are of a certain race? Here we show the top 10 most probable victim races across all age groups and races and we have a visual plot to show.
+```{r echo = FALSE}
+race_by_age <- dat %>%
+  group_by(VIC_AGE_GROUP, VIC_RACE) %>%
+  summarize(count = n()) %>%
+  mutate(prob = count / sum(count))
+
+race_by_age %>%
+  arrange(desc(count)) %>%
+  top_n(10) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+
+race_by_age %>% 
+  ggplot(aes(VIC_AGE_GROUP, count, fill = VIC_RACE)) +
+  geom_bar(stat = "identity") +
+  xlab("Victim Age Group") +
+  ylab("Shooting Incidents") +
+  ggtitle("Shooting Incidents Grouped By Victim Age Group and Victim Race") +
+  guides(fill = guide_legend(title = "Victim Race"))
+```
+
+\newpage
+### Borough and Victim Race
+
+Furthermore, we want to see which races are most probable depending on the borough. Perhaps a certain borough has a higher likelihood to be a particular race. Across all boroughs, the leading victim race is ```black``` followed by ```white hispanics``` and ```black hispanics```.
+```{r echo = FALSE}
+race_by_boro <- dat %>%
+  group_by(BORO, VIC_RACE) %>%
+  summarize(count = n()) %>%
+  mutate(prob = count / sum(count))
+
+race_by_boro %>% 
+  arrange(desc(prob)) %>%
+  top_n(10) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+
+race_by_boro %>%
+  ggplot(aes(BORO, prob, fill = VIC_RACE)) +
+  geom_bar(stat = "identity", position = "stack") +
+  xlab("Borough") +
+  ylab("Probability of Victim Race") +
+  ggtitle("Probabilities of Victim Races in each Borough") +
+  guides(fill = guide_legend(title = "Victim Race"))
+```
+
+\newpage
+### Murder and Victim Race
+
+Is one race more likely to be murdered in the even of a shooting? We group the data by victim race to find out. Across all races except ```AMERICAN INDIAN/ALASKAN NATIVE```, murder rates tend to be similar. ```AMERICAN INDIAN/ALASKAN NATIVE``` is the only victim race to have no murders from shootings.
+```{r echo = FALSE}
+race_by_murder <- dat %>%
+  group_by(VIC_RACE, STATISTICAL_MURDER_FLAG) %>%
+  summarize(count = n()) %>%
+  mutate(prob = count / sum(count))
+
+race_by_murder %>%
+  arrange(desc(prob)) %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+
+race_by_murder %>%
+  ggplot(aes(prob, VIC_RACE, fill = STATISTICAL_MURDER_FLAG)) +
+  geom_bar(stat = "identity") +
+  xlab("Probability of Murder") +
+  ylab("Victim Race") +
+  ggtitle("Likelihood of Murder given the Victim's Race") +
+  guides(fill = guide_legend(title = "Murder"))
+
+```
+
+\newpage
+# Machine Learning Modelling
+
+## Creating Training and Test Sets
+
+```{r results = 'hide'}
+y <- dat$VIC_RACE
+set.seed(718, sample.kind = "Rounding")
+test_index <- createDataPartition(y, times = 1, p = 0.2, list = FALSE)
+train_set <- dat %>% slice(-test_index)
+test_set <- dat %>% slice(test_index)
+```
+
+## Machine Learning Models
+
+### Naive Model
+
+Our baseline model is to simply predict the victim race with the most occurrences in the data set. In this model, we guess ```black``` for every shooting incident victim. 
+```{r results = 'hide'}
+naive_guess <- train_set %>% 
+  group_by(VIC_RACE) %>%
+  summarize(count = n()) %>%
+  filter(count == max(count)) %>%
+  pull(VIC_RACE)
+
+y_naive <- test_set %>%
+  mutate(y_hat = naive_guess) %>%
+  pull(y_hat)
+
+naive_acc <- confusionMatrix(y_naive, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r naive_acc`.
+
+Sitting at just above 71% accuracy, this naive model performs poorly to predict victim races. A lot can be improved upon.
+
+### Decision Tree Model
+
+Here we use a decision tree to see if it performs better than the naive model. A decision tree was chosen because of insights gained from information about boroughs, precincts, and murder rate.
+```{r results = 'hide'}
+fit_rt <- train(VIC_RACE ~ ., data = train_set, method = "rpart")
+
+y_rt <- predict(fit_rt, newdata = test_set)
+
+rt_acc <- confusionMatrix(y_rt, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r rt_acc`.
+
+At 72% accuracy, the Decision Tree model is not significantly better than the naive model.
+
+Plot of Decision Tree:
+```{r echo = FALSE}
+plot(fit_rt$finalModel, margin = 0.1)
+text(fit_rt$finalModel, cex = 0.75)
+```
+
+### Random Forest Model
+
+To further improve our decision tree model, I decided to try a random forest in hopes to improve accuracy as not one decision tree can fit all different shooting incidents.
+```{r results = 'hide'}
+fit_rf <- train(VIC_RACE ~ ., data = train_set, method = "rf", allowParallel = TRUE)
+
+y_rf <- predict(fit_rf, newdata = test_set)
+
+rf_acc <- confusionMatrix(y_rf, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r rf_acc`.
+
+At 76% accuracy, the Random Forest model is already a much better alternative than the Decision Tree model, but because we're dealing with a dangerous situation (shooting incidents), it would be ideal to achieve a much better accuracy. We can potentially increase the accuracy some more if we tune the number of randomly selected predictors.
+
+Plot of Random Forest model accuracy:
+```{r echo = FALSE}
+plot(fit_rf)
+```
+
+### K-Nearest Neighbours Model
+
+The idea with clusters intrigued me to use a KNN model because we saw that certain victim races were grouped with one another in Staten Island. Originally, I had used all variables to train the model below, however, after trial and error, I found that using only ```Latitude``` and ```Longitude```, the model performed best.
+```{r results = 'hide'}
+fit_knn <- train(VIC_RACE ~ Latitude + Longitude, data = train_set, method = "knn")
+
+y_knn <- predict(fit_knn, newdata = test_set) %>% as.factor()
+
+knn_acc <- confusionMatrix(y_knn, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r knn_acc`.
+
+The KNN model is surprisingly worse than the Random Forest model at nearly 73% accuracy. However, upon looking at the plot below, we see that there is potentially higher accuracy if we fine tune the model by adjusting the number of neighbours.
+
+Plot of KNN model accuracy:
+```{r echo = FALSE}
+plot(fit_knn)
+```
+
+### Naive Bayes Model
+
+Since we explored the idea of conditional probabilities in the earlier sections, I figured that it would be appropriate to try a Naive Bayes model to see if could predict victim race. Similar to the KNN model, only using ```Latitude``` and ```Longitude``` provided the best results after trial and error.
+```{r results = 'hide'}
+fit_nb <- train(VIC_RACE ~ Longitude + Latitude, data = train_set, method = "naive_bayes")
+
+y_nb <- predict(fit_nb, newdata = test_set)
+
+nb_acc <- confusionMatrix(y_nb, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r nb_acc`.
+
+The accuracy in the Naive Bayes model is only slightly better than the naive model. Perhaps there is room for improvement if we use cross validation to tune the model, but it appears that it won't get a lot better.
+
+Plot of Naive Bayes accuracy model:
+```{r echo = FALSE}
+plot(fit_nb)
+```
+
+### Multinomial Regression Model
+
+I then thought about a logistic regression model and how that could work on this data set. Upon some research and reading, I remember we learned a bit about multinomial regression and since there are multiple races, I believe it can be useful to try.
+```{r results = 'hide'}
+fit_mln <- train(VIC_RACE ~ ., data = train_set, method = "multinom", MaxNWts = 1000000)
+
+y_mln <- predict(fit_mln, newdata = test_set) %>% as.factor()
+
+mln_acc <- confusionMatrix(y_mln, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r mln_acc`.
+
+Similar to the Naive Bayes model. The Multinomial Regression model is performing poorly but we will include them in the next section to see if there is any improvement at all.
+
+Plot of Multinomial Regression accuracy model:
+```{r echo = FALSE}
+plot(fit_mln)
+```
+
+## Model Table of Results
+
+Here is the table of results for the preliminary models. Random Forest performs the best out of all models.
+```{r echo = FALSE}
+acc_res <- data.frame(Models = c("Naive Model", 
+                                 "Decision Tree",
+                                 "Random Forest",
+                                 "K-Nearest Neighbours",
+                                 "Naive Bayes",
+                                 "Multinomial Regression"),
+                      Accuracy = c(naive_acc,
+                                   rt_acc,
+                                   rf_acc,
+                                   knn_acc,
+                                   nb_acc,
+                                   mln_acc))
+
+acc_res %>% 
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+\newpage
+# Advanced Modelling
+
+## Cross Validation
+
+```{r}
+control <- trainControl(method = "cv", number = 10, p = .9)
+```
+
+### K-Fold Cross Validation Decision Tree Model
+```{r results = 'hide'}
+fit_rt <- train(VIC_RACE ~ .,
+                data = train_set,
+                method = "rpart",
+                tuneGrid = data.frame(cp = seq(0.0, 0.2, len = 50)),
+                trControl = control)
+
+y_rt <- predict(fit_rt, newdata = test_set)
+
+rt_acc <- confusionMatrix(y_rt, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r rt_acc`.
+
+It appears that the decision tree did not perform better after cross validating. Perhaps it performed slightly better prior to cross validation because of the randomness of training and test splits.
+
+Plot of Decision Tree Tuning Results:
+```{r echo = FALSE}
+plot(fit_rt)
+```
+
+### K-Fold Cross Validation Random Forest Model
+```{r results = 'hide'}
+fit_rf <- train(VIC_RACE ~ .,
+                data = train_set,
+                method = "rf",
+                tuneGrid = data.frame(mtry = seq(2,24,2)),
+                trControl = control,
+                allowParallel = TRUE)
+
+y_rf <- predict(fit_rf, newdata = test_set)
+
+rf_acc <- confusionMatrix(y_rf, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r rf_acc`.
+
+The Random Forest model slightly improved after cross validation which is a small success. However, these are not big improvements.
+
+Plot of Random Forest Tuning Results:
+```{r echo = FALSE}
+plot(fit_rf)
+```
+
+### K-Fold Cross Validation K-Nearest Neighbour Model
+```{r results = 'hide'}
+fit_knn <- train(VIC_RACE ~ Latitude + Longitude,
+                 data = train_set,
+                 method = "knn",
+                 tuneGrid = data.frame(k = seq(3,101,3)),
+                 trControl = control)
+
+y_knn <- predict(fit_knn, newdata = test_set) 
+
+knn_acc <- confusionMatrix(y_knn, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r knn_acc`.
+
+Similar to the K-Fold Cross Validation Random Forest model, the KNN model after cross validation performed slightly better than before. 
+
+Plot of KNN Tuning Results:
+```{r echo = FALSE}
+plot(fit_knn)
+```
+
+### K-Fold Cross Validation Naive Bayes Model
+```{r results = 'hide'}
+fit_nb <- train(VIC_RACE ~ Latitude + Longitude,
+                data = train_set,
+                method = "naive_bayes",
+                tuneGrid = expand.grid(laplace = seq(0.1, 10, 0.1),
+                                       usekernel = c(TRUE, FALSE),
+                                       adjust = c(TRUE, FALSE)),
+                trControl = control)
+
+y_nb <- predict(fit_nb, newdata = test_set)
+
+nb_acc <- confusionMatrix(y_nb, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r nb_acc`.
+
+The accuracy of the Naive Bayes model did not improve with cross validation. We can see that the tuning parameters had no effect on the accuracy looking at the plot below.
+
+Plot of Naive Bayes Tuning Results:
+```{r echo = FALSE}
+plot(fit_nb)
+```
+
+### K-Fold Cross Validation Multinomial Regression Model
+```{r results = 'hide'}
+fit_mln <- train(VIC_RACE ~ .,
+                 data = train_set,
+                 method = "multinom",
+                 tuneGrid = data.frame(decay = seq(0.2, 2, 0.2)),
+                 trControl = control,
+                 MaxNWts = 1000000)
+
+y_mln <- predict(fit_mln, newdata = test_set) %>% as.factor()
+
+mln_acc <- confusionMatrix(y_mln, reference = test_set$VIC_RACE)$overall["Accuracy"]
+```
+
+Accuracy: `r mln_acc`.
+
+Like the Naive Bayes model, the Multinomial Regression model did not improve with cross validation. These are disappointing results as I hoped that they could have more predicting power. However, results are results, I cannot force them to be predictable.
+
+Plot of Multinomial Regression Tuning Results:
+```{r echo = FALSE}
+plot(fit_mln)
+```
+
+## Cross Validation Models Table of Results
+
+Here is the table of results for the cross validated models. Random Forest and K-Nearest Neighbours improved with this technique but not by a lot.
+```{r echo = FALSE}
+cv_res <- data_frame(Models = c("K-Fold Cross Validated Decision Tree",
+                                 "K-Fold Cross Validated Random Forest",
+                                 "K-Fold Cross Validated K-Nearest Neighbours",
+                                 "K-Fold Cross Validated Naive Bayes",
+                                 "K-Fold Cross Validated Multinomial Regression"),
+                      Accuracy = c(rt_acc,
+                                   rf_acc,
+                                   knn_acc,
+                                   nb_acc,
+                                   mln_acc))
+acc_res <- bind_rows(acc_res, cv_res)
+
+cv_res %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+
+```
+
+\newpage
+## Ensemble Model
+
+Perhaps an ensemble model would perform better than all the models individually. An ensemble prediction was formed by looking at the most predicted race in each row and using that as the prediction.
+```{r results = 'hide'}
+races <- levels(dat$VIC_RACE)
+y_ensemble <- data.frame(rt = y_rt,
+                         rf = y_rf,
+                         knn = y_knn,
+                         nb = y_nb,
+                         mln = y_mln)
+
+ensemble <- apply(y_ensemble, 1, function(pred) {
+  prob_race <- sapply(races, function(race) {
+    mean(pred == race)
+  })
+  races[which.max(prob_race)]
+})
+
+ensemble <- factor(ensemble, levels = levels(test_set$VIC_RACE))
+ens_acc <- confusionMatrix(ensemble, reference = factor(test_set$VIC_RACE))$overall["Accuracy"]
+
+```
+
+Accuracy: `r ens_acc`.
+
+At 72% accuracy, this ensemble model is worse than the Random Forest and KNN model. Therefore, it is not a good choice for our final model.
+
+```{r echo = FALSE}
+ens_res <- data_frame(Models = "Ensemble Model",
+                                Accuracy = ens_acc)
+acc_res <- bind_rows(acc_res, ens_res)
+```
+
+## Aggregate Table of Results
+
+Below is a table showing the results of applying all the machine learning algorithms to the data set so far. As it turns out, the Random Forest model performs the best and improved via K-Fold Cross Validation, therefore we choose this algorithm for our final model.
+
+```{r echo = FALSE} 
+acc_res %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+\newpage
+# Final Model
+
+
+## Random Forest Model
+
+Using the highest accuracy model from all of the training we've done, we are ready to train the final model using the entire data set. As it turned out, the best model was the Random Forest model using a tuning parameter of mtry = `r fit_rf$bestTune[,"mtry"]` 
+
+```{r results = 'hide'}
+fit_final <- randomForest(VIC_RACE ~ .,
+                          data = dat,
+                          allowParallel = TRUE,
+                          mtry = fit_rf$bestTune[,"mtry"])
+
+y_final <- predict(fit_final, newdata = validation)
+
+final_acc <- confusionMatrix(y_final, reference = factor(validation$VIC_RACE))$overall["Accuracy"]
+```
+
+Accuracy: `r final_acc`.
+
+Our final accuracy was nearly 78% on the validation set. While this is a decent result overall, compared to the naive method of simply guessing ```black``` for every victim, this isn't that much of an improvement. Nevertheless, this shows that trial and error and using proper techniques can improve machine learning algorithms even if its just slightly.
+
+```{r echo = FALSE}
+fin_res <- data_frame(Models = "Final Model",
+                                Accuracy = final_acc)
+acc_res <- bind_rows(acc_res, fin_res)
+```
+
+## Table of Results
+
+Below is the final table of results, we see that we tested many models and achieved relatively the similar accuracies throughout. However, with each step of the process we slightly improved upon on the accuracy and achieved a final accuracy of nearly **78%**.
+```{r echo = FALSE}
+acc_res %>%
+  knitr::kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                 position = "center",
+                 font_size = 10,
+                 full_width = FALSE,
+                 latex_options = "HOLD_position")
+```
+
+\newpage
+# Conclusion
+
+This Capstone Project for Harvard Data Science Professional Certificate Program has taught me a lot by giving me the freedom to choose a data set that interested me. It didn't necessarily go as planned because I initially hoped for a high accuracy prediction for a machine learning project. Upon delving into the project; exploring the data and assessing my own hypotheses, I realized not all data sets are very predictable and that is the nature of data science. By going through the extensive work to unpack and understand the data through multiple lenses, we get a better idea of the world around us.
+
+I first obtained, read, and cleaned the data. Then I explored the data, looking various values that could be present and then looked at the number of shooting incidents after grouping variables together. After that I decided to use data visualization to gain a better idea of the proportion of shooting incidents in relation to other variables as well as inspecting the data geographically. Then I looked through probabilities and distributions for various columns in relation to victim race. Finally, I tested multiple machine learning algorithms and used cross validation to see what performed best. The final model was a Random Forest model and had an accuracy of **78%**. The implications of these results could be interpreted that we need more powerful machine learning techniques, require the use of the variables I decided not to include, or that we're missing information that could lead to predictability. One thing is certain, however, it is that shooting incidents involve ```black``` victims a disproportionate amount because even without any additional insights gained or strategies used, making a naive guess of only ```black``` victims amounts to a **71%** accuracy. This isn't to imply that other races should be involved in shooting incidents more but rather this alludes to victim races being inexplicable from the known variables.
+
+The potential impact of such an algorithm would be to help law enforcement and/or paramedics. For example, let's say a shooting incident occurred in New York City but there is no information of victim race yet, however, the location, borough, precinct, jurisdiction code, etc. is all known. If we are able to predict the victim's race accurately, it may be useful for law enforcement to send more specialized help based on the victim's race to de-escalate a situation. We know that in 2020 & 2021, the relationship between civilians and law enforcement has grown more tense with ideas of racial profiling. Being able to send out an officer that is more reassuring to a particular race could end up saving lives. Of course this is only idealistic. Realistically, this project has a number of limitations. For example, we might not always know the exact location, borough, precinct, etc. and that it is far more important that any help (not specific help) is sent toward the shooting incident and the victim. There isn't always time to have all the information. Secondly, the nature of shooting incidents is not and will not be fully predictable. Anybody can be a victim of shooting, whether it be a stray bullet, or a targeted shooting, nothing is or certain and therefore predicting may not be useful.
+
+There is potential for this project to be completed further but I am satisfied with where it sits. It may not have a lot of predictability with the current algorithms, however a neural network may have a better time or with more data. There are also a number of columns that I left out such as ```PERP_AGE_GROUP```,
+```PERP_SEX```, and ```PERP_RACE```, these columns may have led to higher prediction power but with how many values were missing from these columns, I left them out. New and more innovative approaches could be useful in this project as well, such as transforming the data and adding penalty terms. If you are interested in learning and building out a more powerful model, feel free to do so.
+
+
+
+
+
+
+
+
+
+
+
